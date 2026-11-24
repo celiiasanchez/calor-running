@@ -1,0 +1,243 @@
+---
+title: "Caso Práctico: Diseño de un Proyecto de Análisis de Datos Deportivos"
+subtitle: "Programación y Análisis de Datos Deportivos, Máster en Análisis de Datos Deportivos"
+author: "Celia Sánchez Pérez"
+date: "24 de noviembre de 2026"
+lang: es
+format: docx
+---
+
+# 1. Título del caso práctico
+
+**¿Cuánto nos frena el calor? Impacto de la temperatura y la humedad en el rendimiento de corredores populares en maratones y medias maratones españolas**
+
+# 2. Objetivo del análisis
+
+## Pregunta
+
+¿Cuánto empeora el tiempo final de un corredor popular cuando la carrera se disputa con calor y humedad? ¿Afecta igual a todos los perfiles (sexo, categoría de edad, nivel)?
+
+Para responderla se compararán los resultados de las mismas carreras en distintos años con condiciones meteorológicas diferentes. Así se estimará cuántos segundos por kilómetro se pierden por cada grado de más, usando como medida del estrés térmico la temperatura, la humedad y un índice que combine ambas (por ejemplo, el WBGT).
+
+## Relevancia en el contexto deportivo
+
+- **Para los corredores:** saber cuánto ajustar el ritmo objetivo según la previsión del día de la carrera.
+- **Para los organizadores:** decidir la hora de salida y el número de avituallamientos, y tener criterios para avisar o modificar la prueba si hace demasiado calor.
+- **Contexto de cambio climático:** los episodios de calor son cada vez más frecuentes, también en primavera y otoño, que es cuando se corren la mayoría de maratones.
+
+# 3. Datos necesarios
+
+## Variables
+
+*Resultados de carrera (una fila por corredor y carrera):*
+
+- Identificación de la prueba: nombre, edición (año), fecha, hora de salida, distancia (21,1 o 42,2 km), ciudad.
+- Del corredor: dorsal, sexo y categoría de edad (Sénior, M40, M45…).
+- Rendimiento: tiempo oficial y tiempo neto (chip), tiempos de paso intermedios (5 km, 10 km, media…) y puesto.
+- Estado: finalizado, abandono (DNF) o no presentado.
+
+*Meteorología (por hora, el día de cada carrera):*
+
+- Temperatura del aire (°C), humedad relativa (%), punto de rocío, velocidad del viento y radiación solar o nubosidad.
+- Variable derivada clave: índice de estrés térmico (WBGT aproximado o índice de calor), calculado para el tramo horario en el que se corre la prueba.
+
+*Contexto de la prueba (para no confundir el efecto del calor con otros factores):*
+
+- Desnivel acumulado del recorrido, cambios de recorrido entre ediciones y número de participantes.
+
+## Fuentes
+
+- **Resultados:** webs de clasificaciones de las propias carreras y de las empresas de cronometraje. Como no suelen ofrecer API, se obtendrían por **web scraping** (`{rvest}` en R, o `requests` + `BeautifulSoup` en Python). Algunas carreras permiten descargar las clasificaciones en Excel o CSV.
+- **Meteorología:**
+  - **API AEMET OpenData**: observaciones de la estación oficial más cercana al recorrido. Devuelve JSON y requiere una clave gratuita.
+  - **API Open-Meteo (histórico)**: alternativa con datos horarios por coordenadas, útil si no hay estación AEMET cerca.
+- **Datos de la prueba:** ficha técnica en la web de la carrera (desnivel, hora de salida), introducida a mano en una tabla auxiliar en Excel.
+
+**Muestra prevista:** unas 6–8 carreras (por ejemplo, las maratones de Madrid, Barcelona, Sevilla y Valencia y algunas medias) durante 10 ediciones (2015–2025). Así se cubren años fríos y calurosos de la misma prueba, y salen cientos de miles de registros.
+
+## Formatos esperados
+
+| Fuente | Formato de entrada | Lectura (R · Python) |
+|---|---|---|
+| Clasificaciones (scraping) | HTML → CSV | `rvest` / `readr::read_csv()` · `pandas.read_csv()` |
+| Clasificaciones descargables | Excel (.xlsx) | `readxl::read_excel()` · `pandas.read_excel()` |
+| AEMET / Open-Meteo | JSON | `jsonlite::fromJSON()` · `requests` + `pandas.json_normalize()` |
+| Ficha de carreras | Excel | `readxl::read_excel()` |
+| Datos limpios integrados | .rds / Parquet o CSV | `saveRDS()` · `to_csv()` |
+
+# 4. Transformaciones y limpieza
+
+## Problemas anticipados
+
+| Problema | Ejemplo en este caso |
+|--------|----------------|
+| Formatos de tiempo inconsistentes | `"3:45:12"`, `"03h45'12''"`, `"225:12"` (minutos:segundos); los tiempos de media maratón a veces vienen sin horas (`"1:52:30"` vs `"52:30"`) |
+| Categorías que no coinciden | Cada carrera y cada año nombra distinto las categorías: `"M40"`, `"VetA"`, `"Veterano A"`, `"MASTER 40"` |
+| Valores nulos | Corredores sin tiempo (DNF / no presentado), parciales sin registrar porque falló el chip, horas sin dato en la estación meteorológica |
+| Duplicados | El mismo corredor dos veces al combinar la clasificación general con la de su categoría, o al repetirse una página en el scraping |
+| Valores imposibles o atípicos | Tiempos de maratón por debajo de 2 h o por encima del tiempo de cierre, que indican errores de chip o corredores que han atajado |
+| Desajuste de escalas temporales | Meteorología por hora y carreras de entre 2 y 6 h: hay que decidir qué valor de calor se asigna a cada corredor |
+| Codificación y unidades | Tildes mal leídas (`"CataluÃ±a"`), decimales con coma o punto, viento en km/h o m/s según la fuente |
+
+## Técnicas (R · Python)
+
+**1. Unificar estructura (ETL, fase de transformación)**
+
+- Apilar todas las carreras y ediciones en una única tabla: `bind_rows()` · `pd.concat()`.
+- Renombrar columnas a un esquema común: `rename()` · `.rename()`.
+- Pasar los tiempos a **segundos** con una función propia que reconozca los distintos formatos, usando `{lubridate}` (`hms()`, `period_to_seconds()`) · `pd.to_timedelta()`.
+- Normalizar el texto de las categorías con una tabla de equivalencias: `case_when()` o `left_join()` · `.map()` / `.replace()`.
+- Convertir fechas y horas: `ymd_hm()` · `pd.to_datetime()`.
+
+**2. Limpieza**
+
+- Eliminar duplicados: `distinct()` · `.drop_duplicates()`.
+- Valores nulos: los DNF no se eliminan, se marcan en una variable `finalizado` (sirven para analizar si el calor aumenta los abandonos). Los huecos meteorológicos de una hora se interpolan; si faltan más horas, se usa la fuente alternativa (Open-Meteo): `tidyr::fill()` · `.interpolate()`.
+- Detectar atípicos con reglas: tiempos fuera del rango [mejor marca de la prueba, tiempo de cierre] o parciales incoherentes (un ritmo imposible entre dos puntos de control): `filter()` · `.query()`.
+
+**3. Integración de fuentes**
+
+- Unir resultados y meteorología por *carrera + fecha + hora*: `left_join()` · `pd.merge()`.
+- Para que el calor corresponda al tiempo real que pasa cada corredor en carrera, se calcula la **temperatura media durante su franja** (de la hora de salida a la hora de salida más su tiempo neto). Así, al corredor de 4 h 30 min se le asigna más calor que al de 3 h.
+
+**4. Feature engineering (variables derivadas)**
+
+- `ritmo_s_km` = tiempo neto / distancia: permite comparar maratón y media.
+- `wbgt_aprox`: índice de estrés térmico calculado a partir de la temperatura, la humedad y la radiación.
+- `nivel_corredor`: percentil del corredor dentro de su sexo y categoría en esa edición (`group_by()` + `percent_rank()` · `groupby()` + `.rank(pct=True)`).
+- `ritmo_relativo` = ritmo del corredor / mediana del ritmo de esa carrera en las ediciones "frescas" (por debajo de 12 °C). Es la variable respuesta principal: cuánto más lento se ha ido respecto a lo normal en esa misma prueba.
+- `caida_segunda_mitad` = (2.ª mitad − 1.ª mitad) / 1.ª mitad, calculada con los parciales, como indicador de que el corredor se ha "desfondado".
+
+**5. Reorganización**
+
+- Los parciales vienen en formato ancho (`km5`, `km10`, …). Se pasan a formato largo para analizar la evolución del ritmo dentro de la carrera: `pivot_longer()` · `pd.melt()`.
+
+# 5. Análisis y herramientas
+
+## Métodos
+
+1. **Estadística descriptiva.** Condiciones de cada edición (temperatura y WBGT medios y máximos durante la carrera), para clasificar cada edición como *fresca*, *templada* o *calurosa*. Ritmo medio, mediana y desviación típica por carrera, edición, sexo y categoría, y tasa de abandono (% de DNF) por edición: `group_by()` + `summarise()` · `groupby().agg()`.
+2. **Análisis exploratorio visual.** Relación entre el WBGT y el `ritmo_relativo`, por grupos de corredores, para ver si la relación es lineal o si hay un umbral a partir del cual el calor empieza a penalizar (por ejemplo, por encima de unos 15 °C).
+3. **Correlación.** Correlación de Pearson y de Spearman entre el índice de calor y el `ritmo_relativo`, en conjunto y separada por nivel del corredor.
+4. **Modelo de regresión lineal múltiple** (método central):
+   `ritmo_relativo ~ wbgt + humedad + viento + sexo + categoría + nivel_corredor + wbgt:nivel_corredor`.
+   El coeficiente de `wbgt` responde a la pregunta principal: cuántos segundos por km se pierden por cada grado más. La interacción `wbgt:nivel_corredor` indica si el calor perjudica más a los corredores lentos, que pasan más horas al sol. Se controla el efecto de cada carrera (recorrido, desnivel) incluyendo la carrera como variable, para comparar solo ediciones de una misma prueba.
+5. **Modelo de regresión logística** para la probabilidad de abandono: `finalizado ~ wbgt + sexo + categoría + distancia`.
+6. **Validación.** División en entrenamiento y test por ediciones (no por corredores) y comparación del error (RMSE) del modelo con calor frente a un modelo sin variables meteorológicas. Si el error baja, el calor aporta información real.
+
+## Librerías
+
+| Tarea | R | Python |
+|---|---|---|
+| Importación | `readr`, `readxl`, `jsonlite`, `rvest`, `httr2` | `pandas`, `requests`, `BeautifulSoup` |
+| Manipulación | `dplyr`, `tidyr`, `lubridate`, `purrr` | `pandas`, `numpy` |
+| Modelos | `stats` (`lm()`, `glm()`), `broom` (resultados en tabla) | `statsmodels` (coeficientes y p-valores), `scikit-learn` (validación y RMSE) |
+| Visualización | `ggplot2`, `patchwork`, `plotly` | `matplotlib`, `seaborn` |
+
+Se combinan ambos lenguajes como en la asignatura: **R** para la manipulación, los modelos y los gráficos del informe, y **Python** para el web scraping y las llamadas a las API. Las dos partes se conectan a través de los ficheros intermedios de la carpeta `data/`.
+
+## Uso de LLM: normalización de categorías de edad
+
+Entre carreras y años hay decenas de etiquetas distintas para la misma categoría (`"VetA"`, `"MASTER 40"`, `"M-40"`, `"Veteranos +40"`…). En lugar de escribir a mano la tabla de equivalencias, se le pide al LLM una primera propuesta, que después se revisa.
+
+**Prompt:**
+
+```
+Eres un asistente de limpieza de datos deportivos.
+Te doy una lista de etiquetas de categorías de edad extraídas de
+clasificaciones de maratones y medias maratones españolas (2015-2025).
+
+Asigna cada etiqueta a UNA de estas categorías estándar:
+SENIOR (<35), M35, M40, M45, M50, M55, M60, M65+, DESCONOCIDA.
+Indica también el sexo (H, M o DESCONOCIDO) si se deduce de la etiqueta.
+
+Reglas:
+- Si la etiqueta es ambigua (por ejemplo "Veterano" sin edad), usa DESCONOCIDA.
+  No inventes la edad.
+- Devuelve SOLO un CSV con las columnas:
+  etiqueta_original,categoria_std,sexo,confianza
+  (confianza: alta/media/baja).
+
+Etiquetas:
+{lista_de_etiquetas_unicas}
+```
+
+**Justificación:** ahorra trabajo manual repetitivo y propenso a errores. La salida en CSV se puede leer directamente con `read_csv()`. Las filas marcadas con confianza *media* o *baja* se revisan a mano, y la tabla final validada se guarda en `data/aux/` para que el proceso sea reproducible: el LLM se usa una sola vez, no en cada ejecución.
+
+# 6. Visualización y comunicación
+
+## Gráficos
+
+| # | Gráfico | Qué muestra | Herramienta |
+|-|------------|------------|--------|
+| 1 | Dispersión WBGT vs. ritmo relativo con línea de tendencia suavizada, una faceta por distancia (maratón / media) | El gráfico clave: cuánto se frena el corredor según el calor y si hay un umbral a partir del cual la penalización se dispara | `geom_point()` + `geom_smooth()` + `facet_wrap()` |
+| 2 | Box plots del ritmo relativo por tipo de edición (fresca / templada / calurosa) y nivel del corredor | Si el calor perjudica más a los corredores lentos que a los rápidos | `geom_boxplot()` |
+| 3 | Líneas de evolución del ritmo por tramo de 5 km, comparando ediciones frescas y calurosas | Dónde se pierde el tiempo con calor: el "desfondamiento" en la segunda mitad | `geom_line()` con los parciales en formato largo |
+| 4 | Barras de tasa de abandono (% DNF) por tramo de WBGT | Riesgo para la salud y la seguridad, útil para los organizadores | `geom_col()` |
+| 5 | Gráfico de coeficientes del modelo con intervalos de confianza | Resultado del modelo, fácil de leer | `broom::tidy()` + `geom_pointrange()` |
+| 6 | Mapa de calor carrera × año coloreado por WBGT | Panorama de todas las ediciones y tendencia de los años más calurosos | `geom_tile()` |
+
+Los gráficos 1 y 2 se combinan en una sola figura con `{patchwork}`. El gráfico 1 se ofrece también en versión **interactiva** con `plotly::ggplotly()`: al pasar el ratón por un punto se ven la carrera, el año y la temperatura. Se usa una paleta de colores de frío a calor (azul → rojo), coherente en todos los gráficos.
+
+## Presentación de resultados
+
+1. **Informe reproducible en Quarto** (`informe.qmd`), con salida en HTML (con gráficos interactivos) y en Word para la entrega. Estructura: introducción y pregunta, datos y metodología, resultados, conclusiones y limitaciones. El código de R y de Python va integrado en el propio informe, con bloques ocultos por defecto (`echo: false`) y desplegables para quien quiera verlos (`code-fold: true`). Al volver a renderizar con datos nuevos (por ejemplo, la edición 2026) se actualizan solas todas las tablas y figuras.
+2. **Ficha-resumen para corredores**: una página con la regla práctica derivada del modelo (por ejemplo: "por cada X °C de WBGT por encima de 15, añade Y s/km a tu ritmo objetivo") y el gráfico 1 simplificado. Pensada para que las organizaciones la difundan antes de la carrera.
+3. **Ampliación opcional: calculadora interactiva**. Un pequeño cuadro de mando (dashboard) en Quarto donde el corredor introduce su tiempo objetivo y la previsión de temperatura, y obtiene el ritmo ajustado.
+
+# 7. Gestión del proyecto
+
+## Organización del código y los datos
+
+El proyecto se organiza como un proyecto de Positron/RStudio con esta estructura de carpetas:
+
+```
+calor-running/
+├── README.md             # Descripción, cómo reproducir, fuentes
+├── calor-running.Rproj
+├── .gitignore
+├── .Renviron / .env      # Clave API AEMET (NO se sube a GitHub)
+├── renv.lock             # Versiones de los paquetes de R
+├── requirements.txt      # Versiones de las librerías de Python
+├── data/
+│   ├── raw/              # Datos originales, nunca se modifican
+│   │   ├── resultados/   #   un fichero por carrera y año
+│   │   └── meteo/        #   respuestas JSON de las API
+│   ├── aux/              # Ficha de carreras y tabla de categorías
+│   └── processed/        # Datos limpios e integrados (.rds / .csv)
+├── scripts/
+│   ├── 01_scraping_resultados.py
+│   ├── 02_descarga_meteo.py
+│   ├── 03_limpieza.R
+│   ├── 04_integracion_features.R
+│   ├── 05_modelos.R
+│   └── funciones/        # Funciones propias (tiempo_a_segundos()…)
+├── logs/                 # Registros de ejecución del ETL
+├── reports/
+│   ├── informe.qmd
+│   └── figuras/
+└── tests/                # Comprobaciones de las funciones propias
+```
+
+Los scripts están numerados en el orden en el que se ejecutan (**Extracción → Transformación → Carga**). Cada uno lee de la carpeta anterior y escribe en la siguiente, para que cualquier paso se pueda repetir sin rehacer todo.
+
+## Control de versiones con Git/GitHub
+
+- **Repositorio en GitHub** (`calor-running`), con un `README.md` que explica el objetivo, las fuentes y los pasos para reproducir el análisis.
+- **`.gitignore`**: excluye `data/raw/` (por tamaño y porque los datos de terceros no se redistribuyen), los ficheros con la clave de la API (`.Renviron`, `.env`) y los ficheros temporales. Sí se suben los scripts, la tabla de categorías validada y el informe.
+- **Commits pequeños y descriptivos, por etapas**: `"Añade scraping de la Maratón de Madrid 2015-2025"`, `"Corrige conversión de tiempos sin horas en medias"`, `"Ajusta modelo con interacción wbgt:nivel"`.
+- **Ramas**: `main` contiene siempre una versión que funciona. Las nuevas carreras o cambios en el modelo se desarrollan en ramas (`feature/valencia`, `feature/modelo-logistico`) y se integran con *pull requests*.
+- **Issues** de GitHub para anotar problemas detectados en los datos (por ejemplo, "faltan parciales de la Media de Sevilla 2020"), y **etiquetas** (*tags*) para marcar versiones del análisis (`v1.0-entrega`).
+- Las versiones de los paquetes se fijan con `renv` y `requirements.txt`, para que el informe dé los mismos resultados en otro ordenador.
+
+## Gestión de errores y logs
+
+| Situación | Cómo se maneja |
+|--------|------------|
+| Una página de resultados no carga o cambia de estructura | `try/except` en Python: se registra el error, se pasa a la siguiente carrera y el proceso no se detiene. Se reintenta hasta 3 veces con pausas para no saturar la web |
+| La API de AEMET no responde o devuelve error (límite de peticiones, clave caducada) | Reintentos con espera; si falla, se pasa automáticamente a Open-Meteo y se anota en el log qué fuente se ha usado |
+| Fichero con formato inesperado al leerlo en R | `tryCatch()` con mensajes claros (`warning()` / `stop()`) que indican qué fichero falla y por qué |
+| Tiempo con formato no reconocido | La función `tiempo_a_segundos()` devuelve `NA` con un aviso en lugar de detenerse; al final se informa de cuántos registros se han perdido |
+| Datos incoherentes tras la limpieza | Validaciones automáticas (`stopifnot()` / `assert`): ningún ritmo imposible, ningún duplicado, todas las carreras con datos meteorológicos |
+
+**Logs:** cada ejecución del ETL escribe un registro con fecha y hora en `logs/` (con `{logger}` en R y el módulo `logging` en Python), indicando nivel (INFO / WARNING / ERROR), carrera y año procesados, filas leídas y descartadas, y errores encontrados. Así se puede saber después qué falló y en qué paso.
